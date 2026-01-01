@@ -22,59 +22,6 @@
       <button id="clearBtn">Clear Save</button>
       <button id="muteBtn">🔊</button>
       <input id="volume" type="range" min="0" max="1" step="0.01" value="0.9" title="Volume" />
-      <button id="leaderboardBtn">Leaderboard</button>
-      <button id="clearLeaderboardBtn">Clear Leaderboard</button>
-    </div>
-  </div>
-
-  <!-- Auth panel -->
-  <div id="authPanel">
-    <div id="authInner">
-      <div id="authStatus">Not signed in</div>
-      <input id="authUsername" placeholder="username" maxlength="24" />
-      <input id="authPassword" placeholder="password" type="password" />
-      <div class="authActions">
-        <button id="btnRegister">Register</button>
-        <button id="btnLogin">Login</button>
-        <button id="btnLogout" class="hidden">Logout</button>
-      </div>
-      <div id="authMsg" class="muted"></div>
-      <div style="font-size:12px;margin-top:6px;color:rgba(255,255,255,0.65)">Server: <span id="apiHost">http://localhost:3000</span></div>
-    </div>
-  </div>
-
-  <!-- Finish modal (shown when player reaches the end) -->
-  <div id="finishModal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-panel">
-      <h2>Finish!</h2>
-      <p>You finished the level in <strong id="finishTimeText">0:00.000</strong></p>
-      <div id="finishActions">
-        <label id="localSaveLabel">
-          Name for local leaderboard: <input id="finishName" type="text" maxlength="24" placeholder="Your name" />
-        </label>
-        <div style="margin-top:8px">
-          <button id="saveTimeBtn">Save to Local LB</button>
-          <button id="saveGlobalBtn" class="hidden">Save to Global LB</button>
-          <button id="discardTimeBtn">Continue</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Leaderboard modal -->
-  <div id="leaderboardModal" class="modal hidden" role="dialog" aria-modal="true">
-    <div class="modal-panel">
-      <h2>Leaderboard — Fastest Finishes</h2>
-      <div style="display:flex;gap:12px;align-items:center;margin-bottom:8px">
-        <button id="showLocalLB">Local</button>
-        <button id="showGlobalLB">Global</button>
-        <div style="flex:1"></div>
-        <button id="closeLeaderboardBtn">Close</button>
-      </div>
-      <ol id="leaderboardList"></ol>
-      <div style="font-size:12px;color:rgba(255,255,255,0.6);margin-top:6px">
-        Local leaderboard is stored in your browser. Global leaderboard requires a server.
-      </div>
     </div>
   </div>
 
