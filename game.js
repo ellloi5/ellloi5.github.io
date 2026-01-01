@@ -1,5 +1,6 @@
 // Simple long platformer with checkpoints, animals, procedural sound effects
-// No accounts or global leaderboard. Local save only (localStorage).
+// Scoring system with combos and best-score persistence (localStorage)
+// Added: small floating score popups on animal rescue and checkpoint bonuses
 
 (() => {
   // Canvas setup
@@ -21,6 +22,7 @@
   const clearBtn = document.getElementById('clearBtn');
   const muteBtn = document.getElementById('muteBtn');
   const volumeEl = document.getElementById('volume');
+  const resetScoreBtn = document.getElementById('resetScoreBtn');
 
   saveBtn.addEventListener('click', () => game.saveProgress());
   clearBtn.addEventListener('click', () => { game.clearSave(); });
@@ -181,6 +183,14 @@
     sound.setVolume(v);
   });
 
+  // Reset best score handler
+  resetScoreBtn.addEventListener('click', () => {
+    if (!confirm('Reset saved best score?')) return;
+    localStorage.removeItem('parkour.bestScore');
+    game.bestScore = 0;
+    alert('Best score reset.');
+  });
+
   // Utility functions
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
   function rectIntersect(a,b){
@@ -292,16 +302,28 @@
     gravity: 1800,
     lastTime: performance.now(),
     paused:false,
+    // scoring
+    score: 0,
+    bestScore: 0,
+    comboCount: 0,
+    lastRescueTime: 0,
+    comboWindowMs: 3000, // 3s to chain combo
+    // popups
+    popups: [], // each: {x,y,text,ttl,vx,vy,color,alpha}
+    // finished/timer flags
     timerStarted: false,
     startTime: null,
     finishTimeMs: null,
     finished: false,
+
     init(){
       this.loadProgress();
+      this.loadBestScore();
       this.respawnToCheckpoint(true);
       statusEl.textContent = `Animals saved: ${this.savedAnimalsSet.size} | Checkpoint: ${this.checkpointIndex}`;
       requestAnimationFrame(this.loop.bind(this));
     },
+
     loop(now){
       const dt = Math.min(0.032, (now - this.lastTime)/1000);
       this.lastTime = now;
@@ -309,8 +331,25 @@
       this.render();
       requestAnimationFrame(this.loop.bind(this));
     },
+
     update(dt){
+      // update popups (time-based)
+      for (let i = this.popups.length - 1; i >= 0; i--) {
+        const p = this.popups[i];
+        p.ttl -= dt * 1000;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vy -= 50 * dt; // slight upward deceleration
+        p.alpha = Math.max(0, p.ttl / p.maxTtl);
+        if (p.ttl <= 0) this.popups.splice(i, 1);
+      }
+
       if (this.finished) return; // freeze gameplay when finished
+
+      // decay combo if expired
+      if (this.comboCount > 0 && (performance.now() - this.lastRescueTime) > this.comboWindowMs) {
+        this.comboCount = 0;
+      }
 
       this.handleInput(dt);
       this.applyPhysics(dt);
@@ -334,8 +373,7 @@
         this.finished = true;
         this.finishTimeMs = (this.timerStarted && this.startTime) ? Math.max(0, performance.now() - this.startTime) : 0;
         sound.playCheckpoint();
-        // simple finish feedback
-        alert(`Finished! Time: ${this.formatTime(this.finishTimeMs)}`);
+        alert(`Finished! Time: ${this.formatTime(this.finishTimeMs)} — Score: ${this.score}`);
         return;
       }
 
@@ -354,6 +392,23 @@
       }
       statusEl.textContent = `Animals saved: ${this.savedAnimalsSet.size} | Checkpoint: ${this.checkpointIndex} | Lives: ${this.lives}`;
     },
+
+    spawnPopup(text, worldX, worldY, color = '#ffe28a') {
+      // worldX/worldY are in world coords (camera applied during render)
+      const popup = {
+        x: worldX,
+        y: worldY,
+        text: String(text),
+        ttl: 1100, // ms
+        maxTtl: 1100,
+        vx: (Math.random() - 0.5) * 20,
+        vy: -120 - Math.random() * 40,
+        color,
+        alpha: 1
+      };
+      this.popups.push(popup);
+    },
+
     handleInput(dt){
       const p = this.player;
       const accel = 2400;
@@ -404,6 +459,7 @@
       if (keys['r']) { this.respawnToCheckpoint(); }
       if (keys['c']) { this.clearSave(); }
     },
+
     formatTime(ms){
       if (ms == null || isNaN(ms)) return '0:00.000';
       const total = Math.floor(ms);
@@ -412,6 +468,7 @@
       const msec = total % 1000;
       return `${minutes}:${String(seconds).padStart(2,'0')}.${String(msec).padStart(3,'0')}`;
     },
+
     isTouchingWall(dir){
       const p = this.player;
       const probe = {x:p.x + (dir==-1 ? -3 : p.w+3), y:p.y+4, w:3, h:p.h-8};
@@ -420,6 +477,7 @@
       }
       return false;
     },
+
     applyPhysics(dt){
       const p = this.player;
       p.vy += this.gravity * dt;
@@ -457,6 +515,7 @@
       }
       p.vx *= 0.999;
     },
+
     updateMovingPlatforms(dt){
       for (const mp of movingPlatforms) {
         mp.baseX = mp.baseX ?? mp.x;
@@ -468,6 +527,7 @@
         }
       }
     },
+
     checkAnimalPickup(){
       for (const a of this.animals) {
         if (a.saved) continue;
@@ -476,26 +536,64 @@
         if (rectIntersect(this.player, ar)) {
           a.saved = true;
           this.savedAnimalsSet.add(a.id);
+          // scoring: base points and combo handling
+          const base = 100;
+          const now = performance.now();
+          if (this.lastRescueTime && (now - this.lastRescueTime) <= this.comboWindowMs) {
+            this.comboCount = Math.min(10, this.comboCount + 1);
+          } else {
+            this.comboCount = 1;
+          }
+          this.lastRescueTime = now;
+          const multiplier = 1 + (this.comboCount - 1) * 0.25; // +25% per combo step
+          const points = Math.round(base * multiplier);
+          this.score += points;
+          // save best
+          if (this.score > this.bestScore) {
+            this.bestScore = this.score;
+            try { localStorage.setItem('parkour.bestScore', String(this.bestScore)); } catch(e){}
+          }
           sound.playRescue();
+          // spawn popup near animal (slightly above)
+          this.spawnPopup(`+${points}`, a.x, a.y - 18, '#ffd24d');
+          // subtle combo popup when >1
+          if (this.comboCount > 1) {
+            this.spawnPopup(`x${this.comboCount}`, a.x + 18, a.y - 36, '#ffb86b');
+          }
+          // auto-save when rescuing an animal
           this.saveProgress();
         }
       }
     },
+
     checkCheckpoints(){
       for (const cp of this.checkpoints) {
         const zone = {x:cp.x - 24, y:cp.y - 8, w:cp.w + 48, h:cp.h + 16};
         if (rectIntersect(this.player, zone)) {
           if (this.checkpointIndex < cp.idx) {
             this.checkpointIndex = cp.idx;
+            // checkpoint bonus
+            const bonus = 200;
+            this.score += bonus;
+            if (this.score > this.bestScore) {
+              this.bestScore = this.score;
+              try { localStorage.setItem('parkour.bestScore', String(this.bestScore)); } catch(e){}
+            }
             sound.playCheckpoint();
+            // spawn a checkpoint popup above the flag
+            this.spawnPopup(`Checkpoint +${bonus}`, cp.x + cp.w/2, cp.y - cp.h - 8, '#8eff8a');
             this.saveProgress();
             this.player.vy = -160;
           }
         }
       }
     },
+
     onDeath(){
       this.lives--;
+      // reset combo on death
+      this.comboCount = 0;
+      this.lastRescueTime = 0;
       if (this.lives <= 0) {
         this.clearSave(true);
         this.lives = 3;
@@ -503,6 +601,7 @@
       }
       this.respawnToCheckpoint();
     },
+
     respawnToCheckpoint(init=false){
       let cp = {x: 40, y: VIEW_H/2};
       if (this.checkpoints.length > 0) {
@@ -517,10 +616,12 @@
       }
       this.cameraX = clamp(this.player.x - this.camW/3, 0, LEVEL_LENGTH - this.camW);
     },
+
     saveProgress(){
       const state = {
         checkpointIndex: this.checkpointIndex,
-        savedIds: Array.from(this.savedAnimalsSet)
+        savedIds: Array.from(this.savedAnimalsSet),
+        score: this.score
       };
       try {
         localStorage.setItem('parkour.save', JSON.stringify(state));
@@ -530,6 +631,7 @@
       statusEl.style.opacity = 0.2;
       setTimeout(()=>statusEl.style.opacity=1, 180);
     },
+
     loadProgress(){
       try {
         const raw = localStorage.getItem('parkour.save');
@@ -538,11 +640,23 @@
         if (st && typeof st === 'object') {
           this.checkpointIndex = st.checkpointIndex || 0;
           this.savedAnimalsSet = new Set(st.savedIds || []);
+          this.score = st.score || 0;
         }
       } catch(e) {
         console.warn('Failed to load save', e);
       }
     },
+
+    loadBestScore(){
+      try {
+        const raw = localStorage.getItem('parkour.bestScore');
+        if (!raw) { this.bestScore = 0; return; }
+        this.bestScore = parseInt(raw, 10) || 0;
+      } catch(e) {
+        this.bestScore = 0;
+      }
+    },
+
     clearSave(fullReset=false){
       localStorage.removeItem('parkour.save');
       this.checkpointIndex = 0;
@@ -550,9 +664,13 @@
       for (const a of this.animals) a.saved = false;
       if (fullReset) {
         this.player = JSON.parse(JSON.stringify(player0));
+        this.score = 0;
+        this.comboCount = 0;
+        this.lastRescueTime = 0;
       }
       this.respawnToCheckpoint();
     },
+
     render(){
       ctx.clearRect(0,0,VIEW_W,VIEW_H);
       const grad = ctx.createLinearGradient(0,0,0,VIEW_H);
@@ -606,10 +724,25 @@
       ctx.fillStyle = '#043a46';
       ctx.fillRect(p.x + (p.facing>0?20:6), p.y + 14, 6, 4);
 
+      // draw popups in world space (so they move with camera)
+      for (const pop of this.popups) {
+        ctx.save();
+        ctx.globalAlpha = pop.alpha;
+        ctx.font = '18px system-ui, Arial';
+        ctx.textAlign = 'center';
+        // shadow/stroke for readability
+        ctx.fillStyle = '#111213';
+        ctx.fillText(pop.text, pop.x, pop.y + 2);
+        ctx.fillStyle = pop.color;
+        ctx.fillText(pop.text, pop.x, pop.y);
+        ctx.restore();
+      }
+
       ctx.restore();
 
       this.drawHUD();
     },
+
     drawBackground(){
       for (let i=0;i<6;i++){
         const t = i/6;
@@ -629,6 +762,7 @@
         ctx.fill();
       }
     },
+
     drawHUD(){
       ctx.save();
       ctx.resetTransform();
@@ -637,8 +771,14 @@
       ctx.fillText(`Animals: ${this.savedAnimalsSet.size} / ${this.animals.length}`, 18, 24);
       ctx.fillText(`Checkpoint: ${this.checkpointIndex}`, 18, 44);
       ctx.fillText(`Lives: ${this.lives}`, 18, 64);
+      ctx.fillText(`Score: ${this.score}`, 18, 88);
+      ctx.fillText(`Best: ${this.bestScore}`, 18, 108);
+      if (this.comboCount > 0) {
+        const remaining = Math.max(0, this.comboWindowMs - (performance.now() - this.lastRescueTime));
+        ctx.fillText(`Combo x${this.comboCount} (${(remaining/1000).toFixed(2)}s)`, 18, 132);
+      }
       ctx.fillStyle = 'rgba(255,255,255,0.08)';
-      ctx.fillRect(12, 80, 220, 6);
+      ctx.fillRect(12, 140, 260, 6);
       ctx.restore();
     }
   };
