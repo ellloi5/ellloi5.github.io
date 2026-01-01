@@ -1,7 +1,11 @@
-// Simple long platformer with checkpoints, animals, procedural sound effects, and leaderboard
-// Updated: finish timer + leaderboard (localStorage)
+// Game with accounts + global leaderboard integration (fixed register/login error handling)
+// Replace your existing game.js with this file. This file contains the full game + improved auth helpers.
 
 (() => {
+  // Config - set your API host here if different
+  const API_HOST = window.API_HOST || 'http://localhost:3000';
+  const API_BASE = API_HOST.replace(/\/+$/, '') + '/api';
+
   // Canvas setup
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
@@ -24,22 +28,38 @@
   const leaderboardBtn = document.getElementById('leaderboardBtn');
   const clearLeaderboardBtn = document.getElementById('clearLeaderboardBtn');
 
+  // Auth UI elements
+  const apiHostEl = document.getElementById('apiHost');
+  if (apiHostEl) apiHostEl.textContent = API_HOST;
+
+  const authStatus = document.getElementById('authStatus');
+  const authUsername = document.getElementById('authUsername');
+  const authPassword = document.getElementById('authPassword');
+  const btnRegister = document.getElementById('btnRegister');
+  const btnLogin = document.getElementById('btnLogin');
+  const btnLogout = document.getElementById('btnLogout');
+  const authMsg = document.getElementById('authMsg');
+
+  // Finish / leaderboard UI
   const finishModal = document.getElementById('finishModal');
   const finishTimeText = document.getElementById('finishTimeText');
   const finishNameInput = document.getElementById('finishName');
   const saveTimeBtn = document.getElementById('saveTimeBtn');
+  const saveGlobalBtn = document.getElementById('saveGlobalBtn');
   const discardTimeBtn = document.getElementById('discardTimeBtn');
 
   const leaderboardModal = document.getElementById('leaderboardModal');
   const leaderboardList = document.getElementById('leaderboardList');
   const closeLeaderboardBtn = document.getElementById('closeLeaderboardBtn');
+  const showLocalLB = document.getElementById('showLocalLB');
+  const showGlobalLB = document.getElementById('showGlobalLB');
 
   // Input
   const keys = {};
   window.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; });
   window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
 
-  // Sound manager using Web Audio API (procedural SFX)
+  // --- SoundManager (unchanged) ---
   class SoundManager {
     constructor() {
       this.ctx = null;
@@ -113,12 +133,8 @@
       src.stop(t0 + length + 0.02);
     }
 
-    playJump() {
-      this._beep({freq:520, type:'sawtooth', length:0.12, attack:0.005, decay:0.1, gain:0.45});
-    }
-    playDoubleJump() {
-      this._beep({freq:680, type:'sawtooth', length:0.14, attack:0.005, decay:0.12, gain:0.5});
-    }
+    playJump() { this._beep({freq:520, type:'sawtooth', length:0.12, attack:0.005, decay:0.1, gain:0.45}); }
+    playDoubleJump() { this._beep({freq:680, type:'sawtooth', length:0.14, attack:0.005, decay:0.12, gain:0.5}); }
     playDash() {
       if (!this.ctx) return;
       const t0 = this.ctx.currentTime;
@@ -135,17 +151,9 @@
       osc.start(t0);
       osc.stop(t0 + 0.28);
     }
-    playCheckpoint() {
-      this._beep({freq:760, type:'sine', length:0.22, attack:0.005, decay:0.18, gain:0.45});
-      setTimeout(()=>this._beep({freq:960, type:'sine', length:0.16, attack:0.005, decay:0.12, gain:0.35}), 80);
-    }
-    playRescue() {
-      this._beep({freq:980, type:'triangle', length:0.26, attack:0.01, decay:0.22, gain:0.45});
-      setTimeout(()=>this._noise({length:0.18, gain:0.28}), 30);
-    }
-    playLand() {
-      this._beep({freq:160, type:'sine', length:0.08, attack:0.005, decay:0.06, gain:0.35});
-    }
+    playCheckpoint() { this._beep({freq:760, type:'sine', length:0.22, attack:0.005, decay:0.18, gain:0.45}); setTimeout(()=>this._beep({freq:960, type:'sine', length:0.16, attack:0.005, decay:0.12, gain:0.35}), 80); }
+    playRescue() { this._beep({freq:980, type:'triangle', length:0.26, attack:0.01, decay:0.22, gain:0.45}); setTimeout(()=>this._noise({length:0.18, gain:0.28}), 30); }
+    playLand() { this._beep({freq:160, type:'sine', length:0.08, attack:0.005, decay:0.06, gain:0.35}); }
     playDeath() {
       if (!this.ctx) return;
       const t0 = this.ctx.currentTime;
@@ -162,7 +170,6 @@
       g.connect(this.master);
       src.start(t0);
       src.stop(t0 + 0.52);
-
       const osc = this.ctx.createOscillator();
       const og = this.ctx.createGain();
       osc.type = 'sawtooth';
@@ -176,12 +183,8 @@
       osc.start(t0);
       osc.stop(t0 + 0.52);
     }
-    playFinish() {
-      this._beep({freq:1200, type:'sine', length:0.34, attack:0.01, decay:0.28, gain:0.6});
-      setTimeout(()=>this._beep({freq:1600, type:'triangle', length:0.24, attack:0.01, decay:0.18, gain:0.45}), 110);
-    }
+    playFinish() { this._beep({freq:1200, type:'sine', length:0.34, attack:0.01, decay:0.28, gain:0.6}); setTimeout(()=>this._beep({freq:1600, type:'triangle', length:0.24, attack:0.01, decay:0.18, gain:0.45}), 110); }
   }
-
   const sound = new SoundManager();
 
   // Wire UI sound controls
@@ -190,49 +193,260 @@
     muteBtn.textContent = sound.muted ? '🔈' : '🔊';
   });
   volumeEl.addEventListener('input', (e) => {
-    const v = parseFloat(e.target.value);
-    sound.setVolume(v);
+    sound.setVolume(parseFloat(e.target.value));
   });
 
   saveBtn.addEventListener('click', () => game.saveProgress());
   clearBtn.addEventListener('click', () => { game.clearSave(); });
 
+  // --- Local leaderboard helpers ---
+  const LOCAL_LB_KEY = 'parkour.local.leaderboard';
+  function loadLocalLB() {
+    try {
+      const raw = localStorage.getItem(LOCAL_LB_KEY);
+      if (!raw) return [];
+      const arr = JSON.parse(raw);
+      return Array.isArray(arr) ? arr : [];
+    } catch(e) { return []; }
+  }
+  function saveLocalLB(arr) {
+    try { localStorage.setItem(LOCAL_LB_KEY, JSON.stringify(arr)); } catch(e) { console.warn(e); }
+  }
+  function addLocalEntry(name, ms) {
+    const arr = loadLocalLB();
+    arr.push({name, timeMs: ms, date: (new Date()).toISOString()});
+    arr.sort((a,b)=> a.timeMs - b.timeMs);
+    saveLocalLB(arr.slice(0, 50));
+  }
+
+  // --- API helpers (improved) ---
+  function debugLog(...args){ console.debug('[GAME.API]', ...args); }
+
+  async function apiRequest(pathOrUrl, opts = {}) {
+    // Accept either a full URL or a path like '/register' or 'register'
+    let url;
+    if (/^https?:\/\//i.test(pathOrUrl)) url = pathOrUrl;
+    else {
+      const path = String(pathOrUrl || '').replace(/^\/+/, '');
+      url = API_BASE + (path ? ('/' + path) : '');
+    }
+
+    const headers = Object.assign({'Content-Type':'application/json'}, opts.headers || {});
+    const token = localStorage.getItem('parkour.token');
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+
+    const cfg = Object.assign({}, opts, { headers });
+
+    debugLog('REQUEST', cfg.method || 'GET', url, cfg.body ? cfg.body : '');
+
+    const res = await fetch(url, cfg);
+    const ct = res.headers.get('content-type') || '';
+    let payload;
+    if (ct.includes('application/json')) {
+      payload = await res.json();
+    } else {
+      payload = await res.text();
+    }
+
+    debugLog('RESPONSE', res.status, payload);
+
+    if (!res.ok) {
+      // try to surface helpful server error
+      const serverMessage = (payload && payload.error) ? payload.error : (typeof payload === 'string' ? payload : 'server_error');
+      const err = new Error('HTTP ' + res.status + ': ' + serverMessage);
+      err.status = res.status;
+      err.payload = payload;
+      throw err;
+    }
+    return payload;
+  }
+
+  function apiRegister(username, password) {
+    return apiRequest('/register', { method:'POST', body: JSON.stringify({ username, password }) });
+  }
+  function apiLogin(username, password) {
+    return apiRequest('/login', { method:'POST', body: JSON.stringify({ username, password }) });
+  }
+  function apiMe() {
+    return apiRequest('/me', { method: 'GET' });
+  }
+  async function apiGetLeaderboard(limit=20) {
+    // simple GET; returns JSON { ok: true, rows: [...] } or throws
+    const url = API_BASE + '/leaderboard?limit=' + encodeURIComponent(limit);
+    debugLog('GET LB', url);
+    const r = await fetch(url);
+    if (!r.ok) {
+      throw new Error('Failed to fetch leaderboard: ' + r.status);
+    }
+    return r.json();
+  }
+  function apiSubmitTime(timeMs) {
+    return apiRequest('/leaderboard', { method:'POST', body: JSON.stringify({ timeMs }) });
+  }
+
+  // --- Leaderboard UI wiring ---
   leaderboardBtn.addEventListener('click', () => {
-    renderLeaderboard();
+    renderLeaderboardLocal();
+    renderLeaderboardGlobal().catch(()=>{ /* ignore */ });
     leaderboardModal.classList.remove('hidden');
   });
-  closeLeaderboardBtn.addEventListener('click', () => {
-    leaderboardModal.classList.add('hidden');
-  });
+  closeLeaderboardBtn.addEventListener('click', () => leaderboardModal.classList.add('hidden'));
+  showLocalLB.addEventListener('click', () => renderLeaderboardLocal());
+  showGlobalLB.addEventListener('click', () => renderLeaderboardGlobal());
+
   clearLeaderboardBtn.addEventListener('click', () => {
-    if (confirm('Clear the leaderboard? This cannot be undone.')) {
-      localStorage.removeItem('parkour.leaderboard');
-      renderLeaderboard();
-      alert('Leaderboard cleared.');
+    if (confirm('Clear the local leaderboard? This only clears your browser copy.')) {
+      localStorage.removeItem(LOCAL_LB_KEY);
+      renderLeaderboardLocal();
+      alert('Local leaderboard cleared.');
     }
   });
 
-  // Finish modal actions
-  saveTimeBtn.addEventListener('click', () => {
-    const name = (finishNameInput.value || 'Anon').trim().slice(0, 24) || 'Anon';
-    const t = game.finishTimeMs;
-    if (typeof t === 'number') {
-      saveLeaderboardEntry(name, t);
-      finishModal.classList.add('hidden');
-      renderLeaderboard();
-      leaderboardModal.classList.remove('hidden');
+  // --- Auth UI wiring (improved) ---
+  function setAuthUI(user) {
+    if (user) {
+      authStatus.textContent = `Signed in as ${user.username}`;
+      btnLogout.classList.remove('hidden');
+      btnLogin.classList.add('hidden');
+      btnRegister.classList.add('hidden');
+      authMsg.textContent = '';
+    } else {
+      authStatus.textContent = 'Not signed in';
+      btnLogout.classList.add('hidden');
+      btnLogin.classList.remove('hidden');
+      btnRegister.classList.remove('hidden');
+      authMsg.textContent = '';
     }
-  });
-  discardTimeBtn.addEventListener('click', () => {
-    finishModal.classList.add('hidden');
-    // allow player to continue browsing; we do not automatically restart or reset
-  });
-
-  // Utility functions
-  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
-  function rectIntersect(a,b){
-    return !(a.x+a.w <= b.x || a.x >= b.x+b.w || a.y+a.h <= b.y || a.y >= b.y+b.h);
   }
+
+  async function attemptLoadMe() {
+    const token = localStorage.getItem('parkour.token');
+    if (!token) { setAuthUI(null); return; }
+    try {
+      const res = await apiMe();
+      if (res && res.user) setAuthUI(res.user);
+      else setAuthUI(null);
+    } catch (e) {
+      console.warn('me failed', e);
+      localStorage.removeItem('parkour.token');
+      setAuthUI(null);
+      // show brief message
+      authMsg.textContent = 'Session invalid — please log in again';
+    }
+  }
+  attemptLoadMe();
+
+  // helper to set button disabled states
+  function setAuthControlsDisabled(disabled) {
+    if (btnLogin) btnLogin.disabled = disabled;
+    if (btnRegister) btnRegister.disabled = disabled;
+    if (authUsername) authUsername.disabled = disabled;
+    if (authPassword) authPassword.disabled = disabled;
+  }
+
+  btnRegister.addEventListener('click', async () => {
+    const u = (authUsername.value||'').trim();
+    const p = (authPassword.value||'').trim();
+    if (!u || !p) { authMsg.textContent = 'Enter username & password'; return; }
+    authMsg.textContent = '';
+    setAuthControlsDisabled(true);
+    try {
+      const res = await apiRegister(u, p);
+      // successful registration should return { ok: true, token, user }
+      if (res && res.token) {
+        localStorage.setItem('parkour.token', res.token);
+        await attemptLoadMe();
+        authMsg.textContent = 'Registered and logged in';
+      } else {
+        // sometimes server returns { ok: true, user } without token - handle defensively
+        if (res && res.user) {
+          authMsg.textContent = 'Registered — please log in';
+        } else {
+          authMsg.textContent = 'Registration succeeded but server response was unexpected';
+        }
+      }
+    } catch (e) {
+      console.error('Register error', e);
+      const msg = (e.payload && e.payload.error) ? e.payload.error : e.message || 'Register failed';
+      authMsg.textContent = 'Register failed: ' + String(msg);
+    } finally {
+      setAuthControlsDisabled(false);
+    }
+  });
+
+  btnLogin.addEventListener('click', async () => {
+    const u = (authUsername.value||'').trim();
+    const p = (authPassword.value||'').trim();
+    if (!u || !p) { authMsg.textContent = 'Enter username & password'; return; }
+    authMsg.textContent = '';
+    setAuthControlsDisabled(true);
+    try {
+      const res = await apiLogin(u, p);
+      if (res && res.token) {
+        localStorage.setItem('parkour.token', res.token);
+        await attemptLoadMe();
+        authMsg.textContent = 'Logged in';
+      } else {
+        authMsg.textContent = 'Login succeeded but server response was unexpected';
+      }
+    } catch (e) {
+      console.error('Login error', e);
+      const msg = (e.payload && e.payload.error) ? e.payload.error : e.message || 'Login failed';
+      authMsg.textContent = 'Login failed: ' + String(msg);
+    } finally {
+      setAuthControlsDisabled(false);
+    }
+  });
+
+  btnLogout.addEventListener('click', () => {
+    localStorage.removeItem('parkour.token');
+    setAuthUI(null);
+    authMsg.textContent = 'Logged out';
+  });
+
+  // Render functions for leaderboards
+  function renderLeaderboardLocal() {
+    leaderboardList.innerHTML = '';
+    const arr = loadLocalLB();
+    if (arr.length === 0) {
+      const li = document.createElement('li'); li.textContent = 'No local entries yet';
+      leaderboardList.appendChild(li); return;
+    }
+    arr.slice(0, 20).forEach((e,i) => {
+      const li = document.createElement('li');
+      li.textContent = `${i+1}. ${e.name} — ${formatTime(e.timeMs)} (${new Date(e.date).toLocaleDateString()})`;
+      leaderboardList.appendChild(li);
+    });
+  }
+
+  async function renderLeaderboardGlobal() {
+    leaderboardList.innerHTML = '';
+    const li = document.createElement('li'); li.textContent = 'Loading global leaderboard…'; leaderboardList.appendChild(li);
+    try {
+      const json = await apiGetLeaderboard(20);
+      leaderboardList.innerHTML = '';
+      const rows = (json && json.rows) ? json.rows : [];
+      if (!rows.length) {
+        const empty = document.createElement('li'); empty.textContent = 'No global entries yet';
+        leaderboardList.appendChild(empty); return;
+      }
+      rows.slice(0,20).forEach((r,i) => {
+        const li = document.createElement('li');
+        const displayName = r.name || r.account_username || 'Anon';
+        const timeMs = r.time_ms != null ? r.time_ms : r.timeMs;
+        li.textContent = `${i+1}. ${displayName} — ${formatTime(timeMs)} (${new Date(r.date).toLocaleDateString()})`;
+        leaderboardList.appendChild(li);
+      });
+    } catch (e) {
+      leaderboardList.innerHTML = '';
+      const err = document.createElement('li'); err.textContent = 'Could not load global leaderboard (server unreachable)';
+      leaderboardList.appendChild(err);
+      console.warn('Global LB load failed', e);
+      throw e;
+    }
+  }
+
+  // Format time helper
   function formatTime(ms){
     if (ms == null || isNaN(ms)) return '0:00.000';
     const total = Math.floor(ms);
@@ -242,66 +456,31 @@
     return `${minutes}:${String(seconds).padStart(2,'0')}.${String(msec).padStart(3,'0')}`;
   }
 
-  // Leaderboard storage helpers
-  const LEADERBOARD_KEY = 'parkour.leaderboard';
-  function loadLeaderboard(){
-    try {
-      const raw = localStorage.getItem(LEADERBOARD_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw);
-      if (!Array.isArray(arr)) return [];
-      return arr;
-    } catch(e){ return []; }
-  }
-  function saveLeaderboard(arr){
-    try {
-      localStorage.setItem(LEADERBOARD_KEY, JSON.stringify(arr));
-    } catch(e){ console.warn('Failed to save leaderboard', e); }
-  }
-  function saveLeaderboardEntry(name, ms){
-    const arr = loadLeaderboard();
-    arr.push({name, timeMs: ms, date: (new Date()).toISOString()});
-    arr.sort((a,b)=> a.timeMs - b.timeMs);
-    const top = arr.slice(0, 50); // keep up to 50 historically
-    saveLeaderboard(top);
-  }
-  function renderLeaderboard(){
-    const arr = loadLeaderboard();
-    leaderboardList.innerHTML = '';
-    if (arr.length === 0) {
-      const li = document.createElement('li');
-      li.textContent = 'No entries yet — be the first!';
-      leaderboardList.appendChild(li);
-      return;
-    }
-    const top = arr.slice(0, 10);
-    top.forEach((e,i)=>{
-      const li = document.createElement('li');
-      const rank = i+1;
-      li.textContent = `${rank}. ${e.name} — ${formatTime(e.timeMs)} (${new Date(e.date).toLocaleDateString()})`;
-      leaderboardList.appendChild(li);
-    });
-  }
+  // --- Level & game code (same as before, unchanged) ---
+  // For brevity the actual platformer code is identical to the prior working version.
+  // The important additions — finishTimeMs, finished, and UI hooks for saveGlobalBtn/saveTimeBtn — are integrated below.
 
-  // Level definition (longer)
-  const LEVEL_LENGTH = 22000; // extended
+  // Utility
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+  function rectIntersect(a,b){ return !(a.x+a.w <= b.x || a.x >= b.x+b.w || a.y+a.h <= b.y || a.y >= b.y+b.h); }
+
+  // Level & objects
+  const LEVEL_LENGTH = 22000;
   const groundY = 420;
   let platforms = [];
   let movingPlatforms = [];
   let checkpoints = [];
   let animals = [];
 
-  function makePlatform(x,y,w,h=20,type='static',opts={}){
+  function makePlatform(x,y,w,h=20,type='static',opts={}) {
     const p = {x,y,w,h,type, ...opts};
-    if(type === 'moving') movingPlatforms.push(p);
+    if (type === 'moving') movingPlatforms.push(p);
     else platforms.push(p);
     return p;
   }
 
-  // Create long ground
   makePlatform(-400, groundY, LEVEL_LENGTH + 800, 140);
 
-  // Add dense parkour features
   (function buildParkour(){
     let x = 200;
     let section = 0;
@@ -309,15 +488,10 @@
       section++;
       const style = section % 6;
       if (style === 0) {
-        for (let i=0;i<6;i++){
-          makePlatform(x, groundY - 120 - i*44, 80, 16);
-          x += 110;
-        }
+        for (let i=0;i<6;i++){ makePlatform(x, groundY - 120 - i*44, 80, 16); x += 110; }
         animals.push({x: x-60, y: groundY - 260, w:18, h:16, saved:false, id:'a'+x});
       } else if (style === 1) {
-        const mp = makePlatform(x, groundY - 120, 140, 16, 'moving', {
-          vx: 80, range: 360, baseX: x, dir: 1
-        });
+        makePlatform(x, groundY - 120, 140, 16, 'moving', { vx: 80, range: 360, baseX: x, dir: 1 });
         animals.push({x: x+24, y: groundY - 160, w:18, h:16, saved:false, id:'a'+x});
         x += 480;
       } else if (style === 2) {
@@ -326,53 +500,29 @@
         animals.push({x: x+88, y: groundY - 300, w:18, h:16, saved:false, id:'a'+x});
         x += 320;
       } else if (style === 3) {
-        for(let i=0;i<5;i++){
-          makePlatform(x, groundY - 30 - i*32, 100, 16);
-          x+=130;
-        }
-        const mp2 = makePlatform(x, groundY - 200, 130, 16, 'moving', {vx:90, range:380, baseX:x, dir:-1});
+        for(let i=0;i<5;i++){ makePlatform(x, groundY - 30 - i*32, 100, 16); x+=130; }
+        makePlatform(x, groundY - 200, 130, 16, 'moving', {vx:90, range:380, baseX:x, dir:-1});
         animals.push({x: x+30, y: groundY - 230, w:18, h:16, saved:false, id:'a'+x});
         x += 420;
       } else if (style === 4) {
         let stretch = 8 + Math.floor(Math.random()*6);
-        for(let i=0;i<stretch;i++){
-          if (Math.random() < 0.35) makePlatform(x, groundY - 20 - Math.random()*120, 64, 16);
-          x += 120;
-        }
+        for(let i=0;i<stretch;i++){ if (Math.random() < 0.35) makePlatform(x, groundY - 20 - Math.random()*120, 64, 16); x += 120; }
         animals.push({x: x-100, y: groundY - 60, w:18, h:16, saved:false, id:'a'+x});
       } else {
-        for (let i=0;i<4;i++){
-          makePlatform(x, groundY - (i%2?140:40), 110, 16);
-          x += 140;
-        }
+        for (let i=0;i<4;i++){ makePlatform(x, groundY - (i%2?140:40), 110, 16); x += 140; }
         animals.push({x: x-80, y: groundY - 160, w:18, h:16, saved:false, id:'a'+x});
         x += 60;
       }
-
       if (x > checkpoints.length * 1800 + 600) {
         checkpoints.push({x: x, y: groundY - 180 - (Math.random()*40), w:40, h:80, idx:checkpoints.length});
       }
-
-      if (Math.random() < 0.28) {
-        makePlatform(x+40, groundY - 240 - Math.random()*160, 100, 16);
-      }
-
+      if (Math.random() < 0.28) makePlatform(x+40, groundY - 240 - Math.random()*160, 100, 16);
       x += 30 + Math.random()*140;
     }
   })();
 
-  // Player template
-  const player0 = {
-    x: 60, y: groundY - 70, w:32, h:48,
-    vx:0, vy:0,
-    onGround:false,
-    jumpCount:0,
-    canDash:true,
-    facing:1,
-    alive:true,
-    color:'#4cd1ff',
-    wasOnGround:false
-  };
+  // Player
+  const player0 = { x:60, y:groundY-70, w:32, h:48, vx:0, vy:0, onGround:false, jumpCount:0, canDash:true, facing:1, alive:true, color:'#4cd1ff' };
 
   // Game state
   const game = {
@@ -380,8 +530,8 @@
     cameraX: 0,
     camW: VIEW_W,
     camH: VIEW_H,
-    animals: animals,
-    checkpoints: checkpoints,
+    animals,
+    checkpoints,
     checkpointIndex: 0,
     savedAnimalsSet: new Set(),
     lives: 3,
@@ -411,7 +561,7 @@
     },
 
     update(dt){
-      if (this.finished) return; // freeze gameplay when finished
+      if (this.finished) return;
 
       this.handleInput(dt);
       this.applyPhysics(dt);
@@ -419,7 +569,6 @@
       this.checkAnimalPickup();
       this.checkCheckpoints();
 
-      // start timer on first meaningful movement (player pushes or jumps)
       if (!this.timerStarted) {
         const p = this.player;
         const movingInput = (keys['arrowleft']||keys['a']||keys['arrowright']||keys['d']||keys[' ']||keys['w']||keys['arrowup']);
@@ -429,7 +578,6 @@
         }
       }
 
-      // check finish (reaching the end)
       const finishX = LEVEL_LENGTH - 120;
       if (this.player.x + this.player.w >= finishX && !this.finished) {
         this.finished = true;
@@ -439,7 +587,6 @@
         return;
       }
 
-      // camera follow
       const px = this.player.x + this.player.w/2;
       const leftBound = this.cameraX + this.camW*0.35;
       const rightBound = this.cameraX + this.camW*0.6;
@@ -447,7 +594,6 @@
       if (px > rightBound) this.cameraX = px - this.camW*0.6;
       this.cameraX = clamp(this.cameraX, -300, LEVEL_LENGTH - this.camW + 300);
 
-      // death by falling
       if (this.player.y > VIEW_H + 300) {
         sound.playDeath();
         this.onDeath();
@@ -458,11 +604,17 @@
     },
 
     onFinish(){
-      // show finish modal with time and allow saving to leaderboard
       finishTimeText.textContent = formatTime(this.finishTimeMs);
       finishNameInput.value = '';
       finishModal.classList.remove('hidden');
-      // update status quickly
+
+      // Show or hide global save button depending on auth
+      const token = localStorage.getItem('parkour.token');
+      if (token) {
+        saveGlobalBtn.classList.remove('hidden');
+      } else {
+        saveGlobalBtn.classList.add('hidden');
+      }
       statusEl.textContent = `Finished! Time: ${formatTime(this.finishTimeMs)} — save to leaderboard`;
     },
 
@@ -485,13 +637,9 @@
 
       const jumpPressed = keys[' '] || keys['w'] || keys['arrowup'];
       if (jumpPressed && !this._jumpHeld) {
-        if (p.onGround) {
-          p.vy = -640; p.onGround = false; p.jumpCount = 1;
-          sound.playJump();
-        } else if (p.jumpCount === 1) {
-          p.vy = -560; p.jumpCount = 2;
-          sound.playDoubleJump();
-        } else {
+        if (p.onGround) { p.vy = -640; p.onGround = false; p.jumpCount = 1; sound.playJump(); }
+        else if (p.jumpCount === 1) { p.vy = -560; p.jumpCount = 2; sound.playDoubleJump(); }
+        else {
           const touchingLeftWall = this.isTouchingWall(-1);
           const touchingRightWall = this.isTouchingWall(1);
           if (touchingLeftWall || touchingRightWall) {
@@ -520,9 +668,7 @@
     isTouchingWall(dir){
       const p = this.player;
       const probe = {x:p.x + (dir==-1 ? -3 : p.w+3), y:p.y+4, w:3, h:p.h-8};
-      for (const pl of platforms.concat(movingPlatforms)) {
-        if (rectIntersect(probe, pl)) return true;
-      }
+      for (const pl of platforms.concat(movingPlatforms)) if (rectIntersect(probe, pl)) return true;
       return false;
     },
 
@@ -539,23 +685,13 @@
           const overlapX = Math.min(p.x + p.w - pl.x, pl.x + pl.w - p.x);
           const overlapY = Math.min(p.y + p.h - pl.y, pl.y + pl.h - p.y);
           if (overlapX < overlapY) {
-            if (p.x < pl.x) {
-              p.x -= overlapX;
-              p.vx = Math.min(p.vx, 0);
-            } else {
-              p.x += overlapX;
-              p.vx = Math.max(p.vx, 0);
-            }
+            if (p.x < pl.x) { p.x -= overlapX; p.vx = Math.min(p.vx, 0); }
+            else { p.x += overlapX; p.vx = Math.max(p.vx, 0); }
           } else {
             if (p.y < pl.y) {
               p.y -= overlapY;
-              if (!p.onGround && p.vy >= 0) {
-                sound.playLand();
-              }
-              p.vy = 0;
-              p.onGround = true;
-              p.jumpCount = 0;
-              p.canDash = true;
+              if (!p.onGround && p.vy >= 0) sound.playLand();
+              p.vy = 0; p.onGround = true; p.jumpCount = 0; p.canDash = true;
             } else {
               p.y += overlapY;
               p.vy = 0;
@@ -581,8 +717,7 @@
     checkAnimalPickup(){
       for (const a of this.animals) {
         if (a.saved) continue;
-        const ax = a.x, ay = a.y;
-        const ar = {x:ax-8, y:ay-8, w:a.w, h:a.h};
+        const ar = {x:a.x-8, y:a.y-8, w:a.w, h:a.h};
         if (rectIntersect(this.player, ar)) {
           a.saved = true;
           this.savedAnimalsSet.add(a.id);
@@ -625,28 +760,15 @@
       this.player.x = cp.x;
       this.player.y = cp.y - 60;
       this.player.vx = 0; this.player.vy = 0;
-      for (const a of this.animals) {
-        a.saved = this.savedAnimalsSet.has(a.id);
-      }
+      for (const a of this.animals) a.saved = this.savedAnimalsSet.has(a.id);
       this.cameraX = clamp(this.player.x - this.camW/3, 0, LEVEL_LENGTH - this.camW);
-      // Reset timer if player chooses to respawn before starting timer
-      if (!this.timerStarted) {
-        this.startTime = null;
-      }
+      if (!this.timerStarted) { this.startTime = null; }
     },
 
     saveProgress(){
-      const state = {
-        checkpointIndex: this.checkpointIndex,
-        savedIds: Array.from(this.savedAnimalsSet)
-      };
-      try {
-        localStorage.setItem('parkour.save', JSON.stringify(state));
-      } catch(e) {
-        console.warn('Save failed', e);
-      }
-      statusEl.style.opacity = 0.2;
-      setTimeout(()=>statusEl.style.opacity=1, 180);
+      const state = { checkpointIndex: this.checkpointIndex, savedIds: Array.from(this.savedAnimalsSet) };
+      try { localStorage.setItem('parkour.save', JSON.stringify(state)); } catch(e){ console.warn('Save failed', e); }
+      statusEl.style.opacity = 0.2; setTimeout(()=>statusEl.style.opacity=1, 180);
     },
 
     loadProgress(){
@@ -658,9 +780,7 @@
           this.checkpointIndex = st.checkpointIndex || 0;
           this.savedAnimalsSet = new Set(st.savedIds || []);
         }
-      } catch(e) {
-        console.warn('Failed to load save', e);
-      }
+      } catch(e){ console.warn('Failed to load save', e); }
     },
 
     clearSave(fullReset=false){
@@ -668,9 +788,7 @@
       this.checkpointIndex = 0;
       this.savedAnimalsSet.clear();
       for (const a of this.animals) a.saved = false;
-      if (fullReset) {
-        this.player = JSON.parse(JSON.stringify(player0));
-      }
+      if (fullReset) this.player = JSON.parse(JSON.stringify(player0));
       this.timerStarted = false;
       this.startTime = null;
       this.finishTimeMs = null;
@@ -681,10 +799,8 @@
     render(){
       ctx.clearRect(0,0,VIEW_W,VIEW_H);
       const grad = ctx.createLinearGradient(0,0,0,VIEW_H);
-      grad.addColorStop(0,'#0b1020');
-      grad.addColorStop(1,'#071827');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0,0,VIEW_W,VIEW_H);
+      grad.addColorStop(0,'#0b1020'); grad.addColorStop(1,'#071827');
+      ctx.fillStyle = grad; ctx.fillRect(0,0,VIEW_W,VIEW_H);
 
       this.drawBackground();
 
@@ -692,14 +808,8 @@
       ctx.translate(-this.cameraX, 0);
 
       ctx.fillStyle = '#6b4f3b';
-      for (const pl of platforms) {
-        ctx.fillStyle = '#6b4f3b';
-        ctx.fillRect(pl.x, pl.y, pl.w, pl.h);
-      }
-      for (const pl of movingPlatforms) {
-        ctx.fillStyle = '#8a6b4b';
-        ctx.fillRect(pl.x, pl.y, pl.w, pl.h);
-      }
+      for (const pl of platforms) { ctx.fillStyle = '#6b4f3b'; ctx.fillRect(pl.x, pl.y, pl.w, pl.h); }
+      for (const pl of movingPlatforms) { ctx.fillStyle = '#8a6b4b'; ctx.fillRect(pl.x, pl.y, pl.w, pl.h); }
 
       for (const cp of this.checkpoints) {
         const on = cp.idx <= this.checkpointIndex;
@@ -709,7 +819,7 @@
         ctx.fillRect(cp.x+6, cp.y - cp.h/2, 28, 14);
       }
 
-      // finish marker (visual)
+      // finish marker
       ctx.fillStyle = '#ffd2d2';
       const finishX = LEVEL_LENGTH - 120;
       ctx.fillRect(finishX, groundY - 260, 8, 260);
@@ -718,18 +828,12 @@
 
       for (const a of this.animals) {
         if (a.saved) continue;
-        ctx.fillStyle = '#ffd24d';
-        ctx.fillRect(a.x-8, a.y-8, a.w, a.h);
-        ctx.fillStyle = '#8a5a12';
-        ctx.fillRect(a.x-4, a.y-4, 4, 2);
-        ctx.fillRect(a.x+2, a.y-4, 4, 2);
+        ctx.fillStyle = '#ffd24d'; ctx.fillRect(a.x-8, a.y-8, a.w, a.h);
+        ctx.fillStyle = '#8a5a12'; ctx.fillRect(a.x-4, a.y-4, 4, 2); ctx.fillRect(a.x+2, a.y-4, 4, 2);
       }
 
-      const p = this.player;
-      ctx.fillStyle = p.color;
-      ctx.fillRect(p.x, p.y, p.w, p.h);
-      ctx.fillStyle = '#043a46';
-      ctx.fillRect(p.x + (p.facing>0?20:6), p.y + 14, 6, 4);
+      const p = this.player; ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.w, p.h);
+      ctx.fillStyle = '#043a46'; ctx.fillRect(p.x + (p.facing>0?20:6), p.y + 14, 6, 4);
 
       ctx.restore();
 
@@ -738,48 +842,68 @@
 
     drawBackground(){
       for (let i=0;i<6;i++){
-        const t = i/6;
-        const speed = 0.12 + t*0.2;
+        const speed = 0.12 + (i/6)*0.2;
         const amp = 20 + i*8;
         ctx.fillStyle = `rgba(10,20,40,${0.12 + i*0.06})`;
         ctx.beginPath();
         for (let x= -200; x < VIEW_W + 600; x+=20) {
           const worldX = this.cameraX * speed + x;
           const y = 380 + Math.sin((worldX + i*300)/150) * amp + i*6;
-          if (x===-200) ctx.moveTo(x,y);
-          else ctx.lineTo(x,y);
+          if (x===-200) ctx.moveTo(x,y); else ctx.lineTo(x,y);
         }
-        ctx.lineTo(VIEW_W+600, VIEW_H);
-        ctx.lineTo(-200, VIEW_H);
-        ctx.closePath();
-        ctx.fill();
+        ctx.lineTo(VIEW_W+600, VIEW_H); ctx.lineTo(-200, VIEW_H); ctx.closePath(); ctx.fill();
       }
     },
 
     drawHUD(){
-      ctx.save();
-      ctx.resetTransform();
-      ctx.fillStyle = '#e7eef8';
-      ctx.font = '16px system-ui, Arial';
+      ctx.save(); ctx.resetTransform();
+      ctx.fillStyle = '#e7eef8'; ctx.font = '16px system-ui, Arial';
       const elapsed = this.timerStarted ? (performance.now() - this.startTime) : 0;
       ctx.fillText(`Animals: ${this.savedAnimalsSet.size} / ${this.animals.length}`, 18, 24);
       ctx.fillText(`Checkpoint: ${this.checkpointIndex}`, 18, 44);
       ctx.fillText(`Lives: ${this.lives}`, 18, 64);
       ctx.fillText(`Time: ${formatTime(this.finished ? this.finishTimeMs : elapsed)}`, 18, 88);
-      ctx.fillStyle = 'rgba(255,255,255,0.08)';
-      ctx.fillRect(12, 96, 260, 6);
-      ctx.restore();
+      ctx.fillStyle = 'rgba(255,255,255,0.08)'; ctx.fillRect(12, 96, 260, 6); ctx.restore();
     }
   };
 
-  // initialize
+  // Initialize game
   game.init();
 
-  // Expose for debugging
+  // --- Finish modal actions (saving to local/global leaderboards) ---
+  saveTimeBtn.addEventListener('click', () => {
+    const name = (finishNameInput.value || 'Anon').trim().slice(0,24) || 'Anon';
+    if (typeof game.finishTimeMs === 'number') {
+      addLocalEntry(name, game.finishTimeMs);
+      alert('Saved to local leaderboard');
+      finishModal.classList.add('hidden');
+    } else {
+      alert('No time to save.');
+    }
+  });
+
+  saveGlobalBtn.addEventListener('click', async () => {
+    if (!game.finishTimeMs) return;
+    try {
+      await apiSubmitTime(game.finishTimeMs);
+      alert('Time submitted to global leaderboard!');
+      finishModal.classList.add('hidden');
+      renderLeaderboardGlobal();
+    } catch (e) {
+      console.error('Global submit failed', e);
+      alert('Failed to submit global leaderboard. Are you logged in and is the server reachable?');
+    }
+  });
+
+  discardTimeBtn.addEventListener('click', () => {
+    finishModal.classList.add('hidden');
+  });
+
+  // Expose objects for debugging
   window.GAME = game;
   window.SOUND = sound;
 
-  // Render leaderboard on load (so it's ready)
-  renderLeaderboard();
+  // Render local leaderboard on load
+  renderLeaderboardLocal();
 
 })();
