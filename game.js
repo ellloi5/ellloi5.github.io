@@ -1,6 +1,6 @@
-// Simple long platformer with checkpoints, animals, procedural sound effects
-// Scoring system with combos and best-score persistence (localStorage)
-// Added: small floating score popups on animal rescue and checkpoint bonuses
+// Simple long platformer with grapple item
+// Adds: item pickups (grapple), firing grapple with mouse, basic hook/pull/swing mechanics,
+// plus inventory HUD and popup feedback. No accounts / no global leaderboard.
 
 (() => {
   // Canvas setup
@@ -31,6 +31,27 @@
   const keys = {};
   window.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; });
   window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+  // Capture mouse for grapple firing
+  let lastMouse = {x: 0, y: 0};
+  canvas.addEventListener('mousemove', (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const my = ev.clientY - rect.top;
+    lastMouse.x = mx;
+    lastMouse.y = my;
+  });
+  canvas.addEventListener('mousedown', (ev) => {
+    // left click to fire
+    if (ev.button === 0) {
+      game.fireGrappleAtCanvas(lastMouse.x, lastMouse.y);
+    } else if (ev.button === 2) {
+      // right click to release
+      game.releaseGrapple();
+    }
+  });
+  // Prevent context menu on right click
+  canvas.addEventListener('contextmenu', (ev) => ev.preventDefault());
 
   // Sound manager using Web Audio API (procedural SFX)
   class SoundManager {
@@ -106,12 +127,8 @@
       src.stop(t0 + length + 0.02);
     }
 
-    playJump() {
-      this._beep({freq:520, type:'sawtooth', length:0.12, attack:0.005, decay:0.1, gain:0.45});
-    }
-    playDoubleJump() {
-      this._beep({freq:680, type:'sawtooth', length:0.14, attack:0.005, decay:0.12, gain:0.5});
-    }
+    playJump() { this._beep({freq:520, type:'sawtooth', length:0.12, attack:0.005, decay:0.1, gain:0.45}); }
+    playDoubleJump() { this._beep({freq:680, type:'sawtooth', length:0.14, attack:0.005, decay:0.12, gain:0.5}); }
     playDash() {
       if (!this.ctx) return;
       const t0 = this.ctx.currentTime;
@@ -136,9 +153,7 @@
       this._beep({freq:980, type:'triangle', length:0.26, attack:0.01, decay:0.22, gain:0.45});
       setTimeout(()=>this._noise({length:0.18, gain:0.28}), 30);
     }
-    playLand() {
-      this._beep({freq:160, type:'sine', length:0.08, attack:0.005, decay:0.06, gain:0.35});
-    }
+    playLand() { this._beep({freq:160, type:'sine', length:0.08, attack:0.005, decay:0.06, gain:0.35}); }
     playDeath() {
       if (!this.ctx) return;
       const t0 = this.ctx.currentTime;
@@ -155,7 +170,6 @@
       g.connect(this.master);
       src.start(t0);
       src.stop(t0 + 0.52);
-
       const osc = this.ctx.createOscillator();
       const og = this.ctx.createGain();
       osc.type = 'sawtooth';
@@ -169,6 +183,13 @@
       osc.start(t0);
       osc.stop(t0 + 0.52);
     }
+
+    playGrappleFire() { this._beep({freq:820, type:'sawtooth', length:0.12, attack:0.001, decay:0.12, gain:0.35}); }
+    playGrappleAttach() {
+      this._beep({freq:1080, type:'sine', length:0.16, attack:0.005, decay:0.14, gain:0.45});
+      setTimeout(()=>this._beep({freq:760, type:'sine', length:0.12, attack:0.005, decay:0.08, gain:0.35}), 90);
+    }
+    playGrappleRelease() { this._beep({freq:420, type:'triangle', length:0.12, attack:0.005, decay:0.12, gain:0.32}); }
   }
 
   const sound = new SoundManager();
@@ -204,6 +225,7 @@
   let movingPlatforms = [];
   let checkpoints = [];
   let animals = [];
+  let items = []; // pickups (grapple etc.)
 
   function makePlatform(x,y,w,h=20,type='static',opts={}){
     const p = {x,y,w,h,type, ...opts};
@@ -215,7 +237,7 @@
   // Create long ground
   makePlatform(-400, groundY, LEVEL_LENGTH + 800, 140);
 
-  // Add dense parkour features
+  // Add dense parkour features and item placements
   (function buildParkour(){
     let x = 200;
     let section = 0;
@@ -233,11 +255,14 @@
           vx: 80, range: 360, baseX: x, dir: 1
         });
         animals.push({x: x+24, y: groundY - 160, w:18, h:16, saved:false, id:'a'+x});
+        // place grapple item occasionally
+        if (Math.random() < 0.35) items.push({x: x+60, y: groundY - 160 - 28, w:18, h:18, type:'grapple', picked:false, id:'g'+x});
         x += 480;
       } else if (style === 2) {
         makePlatform(x, groundY - 260, 34, 260);
         makePlatform(x+180, groundY - 200, 34, 200);
         animals.push({x: x+88, y: groundY - 300, w:18, h:16, saved:false, id:'a'+x});
+        if (Math.random() < 0.25) items.push({x: x+30, y: groundY - 260 - 26, w:18, h:18, type:'grapple', picked:false, id:'g'+x});
         x += 320;
       } else if (style === 3) {
         for(let i=0;i<5;i++){
@@ -285,7 +310,8 @@
     facing:1,
     alive:true,
     color:'#4cd1ff',
-    wasOnGround:false
+    wasOnGround:false,
+    hasGrapple:false // inventory flag
   };
 
   // Game state
@@ -295,6 +321,7 @@
     camW: VIEW_W,
     camH: VIEW_H,
     animals: animals, // array of {x,y,w,h,saved,id}
+    items: items,     // pickups
     checkpoints: checkpoints,
     checkpointIndex: 0,
     savedAnimalsSet: new Set(),
@@ -310,6 +337,17 @@
     comboWindowMs: 3000, // 3s to chain combo
     // popups
     popups: [], // each: {x,y,text,ttl,vx,vy,color,alpha}
+    // grapple state
+    grapple: {
+      enabled: false,
+      attached: false,
+      attachX: 0,
+      attachY: 0,
+      length: 0,
+      maxRange: 520,
+      cooldownMs: 300,
+      lastFire: 0
+    },
     // finished/timer flags
     timerStarted: false,
     startTime: null,
@@ -321,6 +359,10 @@
       this.loadBestScore();
       this.respawnToCheckpoint(true);
       statusEl.textContent = `Animals saved: ${this.savedAnimalsSet.size} | Checkpoint: ${this.checkpointIndex}`;
+      // wire release key 'e'
+      window.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 'e') this.releaseGrapple();
+      });
       requestAnimationFrame(this.loop.bind(this));
     },
 
@@ -346,6 +388,11 @@
 
       if (this.finished) return; // freeze gameplay when finished
 
+      // grapple behaviour when attached: apply constraint forces / swinging
+      if (this.grapple.attached) {
+        this.applyGrapplePhysics(dt);
+      }
+
       // decay combo if expired
       if (this.comboCount > 0 && (performance.now() - this.lastRescueTime) > this.comboWindowMs) {
         this.comboCount = 0;
@@ -355,6 +402,7 @@
       this.applyPhysics(dt);
       this.updateMovingPlatforms(dt);
       this.checkAnimalPickup();
+      this.checkItemPickup();
       this.checkCheckpoints();
 
       // start timer on first meaningful movement
@@ -393,8 +441,116 @@
       statusEl.textContent = `Animals saved: ${this.savedAnimalsSet.size} | Checkpoint: ${this.checkpointIndex} | Lives: ${this.lives}`;
     },
 
+    // GRAPPLE: convert canvas coords to world coords then fire
+    fireGrappleAtCanvas(canvasX, canvasY) {
+      // require that player has grapple item
+      if (!this.player.hasGrapple) return;
+      const now = performance.now();
+      if (now - this.grapple.lastFire < this.grapple.cooldownMs) return;
+      this.grapple.lastFire = now;
+      // compute world coords
+      const wx = canvasX + this.cameraX;
+      const wy = canvasY;
+      this.fireGrappleTowards(wx, wy);
+    },
+
+    fireGrappleTowards(targetX, targetY) {
+      // play sound
+      sound.playGrappleFire();
+      // if already attached, do nothing (or re-seat)
+      if (this.grapple.attached) return;
+      const p = this.player;
+      const sx = p.x + p.w/2;
+      const sy = p.y + p.h/2;
+      // clamp range to maxRange
+      const dx = targetX - sx, dy = targetY - sy;
+      const dist = Math.hypot(dx, dy);
+      if (dist > this.grapple.maxRange) {
+        // scale down target
+        targetX = sx + dx * (this.grapple.maxRange / dist);
+        targetY = sy + dy * (this.grapple.maxRange / dist);
+      }
+      // find intersection point with platforms by stepping along the segment
+      const found = this.findHookPoint(sx, sy, targetX, targetY, 6);
+      if (found) {
+        this.grapple.attached = true;
+        this.grapple.attachX = found.x;
+        this.grapple.attachY = found.y;
+        this.grapple.length = Math.hypot(found.x - sx, found.y - sy);
+        sound.playGrappleAttach();
+        this.spawnPopup('Hooked', found.x, found.y - 6, '#aaffff');
+      } else {
+        // miss: small popup near target
+        this.spawnPopup('Miss', targetX, targetY, '#cccccc');
+      }
+    },
+
+    // stepping raycast: returns first point inside a platform rect or null
+    findHookPoint(sx, sy, tx, ty, step=6) {
+      const total = Math.hypot(tx - sx, ty - sy);
+      const steps = Math.max(4, Math.ceil(total / step));
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const x = sx + (tx - sx) * t;
+        const y = sy + (ty - sy) * t;
+        // check against all platforms and movingPlatforms and platform-like items (so you can hook to items too)
+        for (const pl of platforms.concat(movingPlatforms)) {
+          if (x >= pl.x && x <= pl.x + pl.w && y >= pl.y && y <= pl.y + pl.h) {
+            // clamp point to be on surface (we'll use the sampled point)
+            return {x, y, platform: pl};
+          }
+        }
+      }
+      return null;
+    },
+
+    releaseGrapple() {
+      if (!this.grapple.attached) return;
+      this.grapple.attached = false;
+      sound.playGrappleRelease();
+      this.spawnPopup('Released', this.player.x + this.player.w/2, this.player.y - 8, '#ffb0b0');
+    },
+
+    // apply a spring pulling force towards attach point + allow swinging by left/right input
+    applyGrapplePhysics(dt) {
+      const p = this.player;
+      const g = this.grapple;
+      const px = p.x + p.w/2;
+      const py = p.y + p.h/2;
+      const dx = g.attachX - px;
+      const dy = g.attachY - py;
+      const dist = Math.hypot(dx, dy) || 0.0001;
+      // spring force to maintain length (simple constraint)
+      const stretch = dist - g.length;
+      const k = 12.0; // spring stiffness
+      const pullAx = (dx / dist) * (stretch * k);
+      const pullAy = (dy / dist) * (stretch * k);
+      // apply to velocity
+      p.vx += pullAx * dt;
+      p.vy += pullAy * dt;
+      // allow player to "swing": left/right input adds tangential impulse
+      const left = keys['arrowleft'] || keys['a'];
+      const right = keys['arrowright'] || keys['d'];
+      if (left !== right) {
+        // tangent vector (perpendicular)
+        const tx = -dy / dist;
+        const ty = dx / dist;
+        const swingStrength = 420; // tuning
+        const dir = left ? -1 : 1;
+        p.vx += tx * swingStrength * dir * dt;
+        p.vy += ty * swingStrength * dir * dt;
+      }
+      // gentle damping to avoid runaway
+      p.vx *= 0.9995;
+      p.vy *= 0.9998;
+
+      // Optional: if player gets very close, shorten the length to pull them in
+      if (dist < 40) {
+        g.length = Math.max(20, g.length - 220 * dt);
+      }
+    },
+
     spawnPopup(text, worldX, worldY, color = '#ffe28a') {
-      // worldX/worldY are in world coords (camera applied during render)
       const popup = {
         x: worldX,
         y: worldY,
@@ -484,6 +640,7 @@
       p.x += p.vx * dt;
       p.y += p.vy * dt;
 
+      // if grapple attached, we keep physics but the grapple force was applied earlier
       p.onGround = false;
       const allPlatforms = platforms.concat(movingPlatforms);
       for (const pl of allPlatforms) {
@@ -566,6 +723,25 @@
       }
     },
 
+    // item pickup handling
+    checkItemPickup(){
+      for (const it of this.items) {
+        if (it.picked) continue;
+        const ir = {x:it.x - it.w/2, y: it.y - it.h/2, w: it.w, h: it.h};
+        if (rectIntersect(this.player, ir)) {
+          it.picked = true;
+          if (it.type === 'grapple') {
+            this.player.hasGrapple = true;
+            this.grapple.enabled = true;
+            sound.playGrappleAttach();
+            this.spawnPopup('Grapple', it.x, it.y - 12, '#aaffff');
+          } else {
+            this.spawnPopup('Picked', it.x, it.y - 12, '#aaffff');
+          }
+        }
+      }
+    },
+
     checkCheckpoints(){
       for (const cp of this.checkpoints) {
         const zone = {x:cp.x - 24, y:cp.y - 8, w:cp.w + 48, h:cp.h + 16};
@@ -594,6 +770,8 @@
       // reset combo on death
       this.comboCount = 0;
       this.lastRescueTime = 0;
+      // release grapple on death
+      if (this.grapple.attached) this.releaseGrapple();
       if (this.lives <= 0) {
         this.clearSave(true);
         this.lives = 3;
@@ -614,6 +792,11 @@
       for (const a of this.animals) {
         a.saved = this.savedAnimalsSet.has(a.id);
       }
+      for (const it of this.items) {
+        // keep picked state persisted via save; items are not persisted currently except grapple ownership
+        // we assume if player.hasGrapple true then grapples are already picked and items can be hidden
+        if (it.type === 'grapple' && this.player.hasGrapple) it.picked = true;
+      }
       this.cameraX = clamp(this.player.x - this.camW/3, 0, LEVEL_LENGTH - this.camW);
     },
 
@@ -621,7 +804,8 @@
       const state = {
         checkpointIndex: this.checkpointIndex,
         savedIds: Array.from(this.savedAnimalsSet),
-        score: this.score
+        score: this.score,
+        hasGrapple: this.player.hasGrapple
       };
       try {
         localStorage.setItem('parkour.save', JSON.stringify(state));
@@ -641,6 +825,12 @@
           this.checkpointIndex = st.checkpointIndex || 0;
           this.savedAnimalsSet = new Set(st.savedIds || []);
           this.score = st.score || 0;
+          this.player.hasGrapple = !!st.hasGrapple;
+          if (this.player.hasGrapple) {
+            // mark items of type grapple as picked
+            for (const it of this.items) if (it.type === 'grapple') it.picked = true;
+            this.grapple.enabled = true;
+          }
         }
       } catch(e) {
         console.warn('Failed to load save', e);
@@ -662,6 +852,10 @@
       this.checkpointIndex = 0;
       this.savedAnimalsSet.clear();
       for (const a of this.animals) a.saved = false;
+      for (const it of this.items) it.picked = false;
+      this.player.hasGrapple = false;
+      this.grapple.attached = false;
+      this.grapple.enabled = false;
       if (fullReset) {
         this.player = JSON.parse(JSON.stringify(player0));
         this.score = 0;
@@ -684,16 +878,19 @@
       ctx.save();
       ctx.translate(-this.cameraX, 0);
 
+      // platforms
       ctx.fillStyle = '#6b4f3b';
       for (const pl of platforms) {
         ctx.fillStyle = '#6b4f3b';
         ctx.fillRect(pl.x, pl.y, pl.w, pl.h);
       }
+      // moving platforms
       for (const pl of movingPlatforms) {
         ctx.fillStyle = '#8a6b4b';
         ctx.fillRect(pl.x, pl.y, pl.w, pl.h);
       }
 
+      // checkpoints
       for (const cp of this.checkpoints) {
         const on = cp.idx <= this.checkpointIndex;
         ctx.fillStyle = on ? '#8eff8a' : '#4f6b5a';
@@ -702,27 +899,62 @@
         ctx.fillRect(cp.x+6, cp.y - cp.h/2, 28, 14);
       }
 
-      // finish marker (visual)
+      // finish marker
       ctx.fillStyle = '#ffd2d2';
       const finishX = LEVEL_LENGTH - 120;
       ctx.fillRect(finishX, groundY - 260, 8, 260);
       ctx.fillStyle = '#ff7a7a';
       ctx.fillRect(finishX+10, groundY - 200, 36, 16);
 
+      // items (grapple pickups)
+      for (const it of this.items) {
+        if (it.picked) continue;
+        ctx.save();
+        // small icon rectangle
+        ctx.fillStyle = (it.type === 'grapple') ? '#aaffff' : '#cfefff';
+        ctx.fillRect(it.x - it.w/2, it.y - it.h/2, it.w, it.h);
+        // tiny symbol
+        ctx.fillStyle = '#043a46';
+        ctx.font = '12px system-ui, Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(it.type === 'grapple' ? 'G' : '?', it.x, it.y + 4);
+        ctx.restore();
+      }
+
+      // animals
       for (const a of this.animals) {
         if (a.saved) continue;
         ctx.fillStyle = '#ffd24d';
         ctx.fillRect(a.x-8, a.y-8, a.w, a.h);
+        // simple face
         ctx.fillStyle = '#8a5a12';
         ctx.fillRect(a.x-4, a.y-4, 4, 2);
         ctx.fillRect(a.x+2, a.y-4, 4, 2);
       }
 
+      // player
       const p = this.player;
       ctx.fillStyle = p.color;
       ctx.fillRect(p.x, p.y, p.w, p.h);
       ctx.fillStyle = '#043a46';
       ctx.fillRect(p.x + (p.facing>0?20:6), p.y + 14, 6, 4);
+
+      // draw grapple rope if attached
+      if (this.grapple.attached) {
+        ctx.strokeStyle = '#9fe6ff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        const px = p.x + p.w/2;
+        const py = p.y + p.h/2;
+        ctx.moveTo(px, py);
+        ctx.lineTo(this.grapple.attachX, this.grapple.attachY);
+        ctx.stroke();
+        // small anchor marker
+        ctx.fillStyle = '#aaffff';
+        ctx.beginPath();
+        ctx.arc(this.grapple.attachX, this.grapple.attachY, 4, 0, Math.PI*2);
+        ctx.fill();
+      }
 
       // draw popups in world space (so they move with camera)
       for (const pop of this.popups) {
@@ -777,8 +1009,11 @@
         const remaining = Math.max(0, this.comboWindowMs - (performance.now() - this.lastRescueTime));
         ctx.fillText(`Combo x${this.comboCount} (${(remaining/1000).toFixed(2)}s)`, 18, 132);
       }
+      // inventory display
+      ctx.fillStyle = this.player.hasGrapple ? '#aaffff' : '#666';
+      ctx.fillText(`Grapple: ${this.player.hasGrapple ? 'Ready' : 'None'}`, 18, 156);
       ctx.fillStyle = 'rgba(255,255,255,0.08)';
-      ctx.fillRect(12, 140, 260, 6);
+      ctx.fillRect(12, 164, 260, 6);
       ctx.restore();
     }
   };
